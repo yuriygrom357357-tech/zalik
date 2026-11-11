@@ -2482,6 +2482,9 @@ var qrcode = function() {
 }));
 
 </script>
+<script src="vendor/firebase-app-compat.js"></script>
+<script src="vendor/firebase-auth-compat.js"></script>
+<script src="vendor/firebase-firestore-compat.js"></script>
 <script>
 "use strict";
 /* ---------- дані ---------- */
@@ -2491,9 +2494,39 @@ const LIB=[["00. База для піхотинця","1foELmDWMdhkHRLwaG7G289v5h
 const RANKS=["рекрут","солдат","старший солдат","молодший сержант","сержант","старший сержант","головний сержант","штаб-сержант","майстер-сержант","молодший лейтенант","лейтенант","старший лейтенант","капітан","майор"];
 const TYPES={one:"Одна правильна відповідь",multi:"Кілька правильних відповідей",yn:"Так / Ні",open:"Відкрите запитання"};
 
-let D=load();
+/* ---------- хмара (Firebase) ---------- */
+const CFG={apiKey:"AIzaSyBrITL_3aqvI4kkXMpWIyzspH5ox6F3lBI",authDomain:"zalik-329fc.firebaseapp.com",projectId:"zalik-329fc",storageBucket:"zalik-329fc.firebasestorage.app",messagingSenderId:"791162336200",appId:"1:791162336200:web:c51e7b1c3b1d6e987146fd"};
+let CLOUD=false,auth=null,db=null,authReady=false,pendingProfile=null,loaded={},counts={},unsub=null,subCode=null;
+try{if(window.firebase&&location.protocol!=="file:"){firebase.initializeApp(CFG);auth=firebase.auth();auth.languageCode="uk";db=firebase.firestore();CLOUD=true}}catch(e){CLOUD=false}
+const TS=()=>firebase.firestore.FieldValue.serverTimestamp();
+const tRef=c=>db.collection("tests").doc(c);
+const ms=x=>x&&x.toMillis?x.toMillis():(typeof x==="number"?x:0);
+const authMsg=e=>({"auth/invalid-credential":"Пошта або пароль не збігаються. Перевірте розкладку клавіатури та Caps Lock.","auth/wrong-password":"Пошта або пароль не збігаються. Перевірте розкладку клавіатури та Caps Lock.","auth/user-not-found":"Облікового запису з такою поштою немає. Створіть його.","auth/email-already-in-use":"Обліковий запис із такою поштою вже існує. Увійдіть або відновіть пароль.","auth/weak-password":"Пароль закороткий. Потрібно щонайменше 6 символів.","auth/invalid-email":"Пошту введено з помилкою. Перевірте адресу.","auth/too-many-requests":"Забагато спроб. Зачекайте кілька хвилин і спробуйте знову.","auth/network-request-failed":"Немає зв'язку з сервером. Перевірте інтернет і спробуйте ще раз."}[e&&e.code]||"Не вдалося виконати дію. Перевірте інтернет і спробуйте ще раз.");
+function pubTest(t){const o={owner:auth.currentUser.uid,code:t.code,title:t.title,topic:t.topic||"",minutes:t.minutes,attempts:t.attempts,shuffleQ:!!t.shuffleQ,shuffleO:!!t.shuffleO,scale:t.scale,open:!!t.open,created:t.created,
+  questions:t.questions.map(q=>({id:q.id,type:q.type,text:q.text,tag:q.tag||"",points:q.points,options:q.options.map(x=>({t:x.t}))}))};
+  const ok={};t.questions.forEach(q=>ok[q.id]=q.options.map((x,i)=>x.ok?i:-1).filter(i=>i>=0));return {o,ok}}
+function mergeKey(t,ok){t.questions.forEach(q=>q.options.forEach((x,i)=>x.ok=!!(ok&&ok[q.id]&&ok[q.id].includes(i))));return t}
+async function cloudSaveTest(t){const {o,ok}=pubTest(t);await tRef(t.code).set(o);await tRef(t.code).collection("private").doc("key").set({ok})}
+async function cloudLoadTests(){const qs=await db.collection("tests").where("owner","==",auth.currentUser.uid).get();
+  const arr=await Promise.all(qs.docs.map(async d=>{const t=d.data();let ok={};try{const k=await d.ref.collection("private").doc("key").get();ok=(k.data()||{}).ok||{}}catch(e){}return mergeKey(t,ok)}));
+  const ex=D.tests.ZRAZOK&&D.tests.ZRAZOK.example?D.tests.ZRAZOK:null;D.tests={};if(ex)D.tests.ZRAZOK=ex;arr.forEach(t=>D.tests[t.code]=t)}
+async function cloudDeleteTest(c){const r=tRef(c);for(const sub of ["attempts","slots","private"]){const qs=await r.collection(sub).get();await Promise.all(qs.docs.map(d=>d.ref.delete()))}await r.delete()}
+function attFromDoc(c,d){const x=d.data();const st=ms(x.started),fi=ms(x.finished);return {id:d.id,code:c,rank:x.rank||"",name:x.name||"",group:x.group||"",started:st,finished:fi||st,secs:fi?Math.max(0,Math.round((fi-st)/1000)):0,answers:x.answers||{},manual:x.manual||{},done:x.done===true,res:x.res||null}}
+function setAttempts(c,docs){D.attempts=D.attempts.filter(a=>a.code!==c).concat(docs.map(d=>attFromDoc(c,d)));loaded[c]=true;counts[c]=attemptsOf(c).length}
+function publishResults(c){const t=D.tests[c];if(!t)return;D.attempts.filter(a=>a.code===c&&a.done).forEach(a=>{const s=scoreAttempt(t,a);const want={pct:s.pct,pts:s.pts,max:s.max,grade:s.grade,pending:s.pending};
+  if(JSON.stringify(want)!==JSON.stringify(a.res)){a.res=want;tRef(c).collection("attempts").doc(a.id).update({res:want}).catch(()=>{})}})}
+function unwatch(){if(unsub){unsub();unsub=null}subCode=null}
+function watch(c){if(!CLOUD||subCode===c||(D.tests[c]&&D.tests[c].example))return;unwatch();subCode=c;
+  unsub=tRef(c).collection("attempts").onSnapshot(qs=>{setAttempts(c,qs.docs);publishResults(c);
+    const h=location.hash.slice(1);if((h==="res-"+c||h==="run-"+c)&&!(document.activeElement&&document.activeElement.dataset&&document.activeElement.dataset.man)){const y=window.scrollY;(h[1]==="e"?vRes:vRun)(c);window.scrollTo(0,y)}},()=>{})}
+async function loadAllAttempts(){const cs=Object.values(D.tests).filter(t=>!t.example&&!loaded[t.code]).map(t=>t.code);
+  await Promise.all(cs.map(async c=>{const qs=await tRef(c).collection("attempts").get();setAttempts(c,qs.docs);publishResults(c)}))}
+async function freeCode(){for(let i=0;i<8;i++){const c=newCode();if(!CLOUD)return c;const d=await tRef(c).get();if(!d.exists)return c}throw new Error("code")}
+async function fetchTest(c){if(D.tests[c]&&!(CLOUD&&D.tests[c].example))return D.tests[c];if(!CLOUD||!/^[A-Z0-9]{4,12}$/.test(c))return null;const d=await tRef(c).get();if(!d.exists)return null;D.tests[c]=d.data();D.tests[c].remote=true;return D.tests[c]}
+const loading=t=>`<div class="panel"><p class="muted">${t||"Завантаження…"}</p></div>`;
+let D=CLOUD?{acct:null,session:false,tests:{},attempts:[]}:load();
 function load(){try{const d=JSON.parse(localStorage.getItem(KEY));if(d&&d.tests)return d}catch(e){}return {acct:null,session:false,tests:{},attempts:[]}}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(D))}catch(e){}}
+function save(){if(CLOUD)return;try{localStorage.setItem(KEY,JSON.stringify(D))}catch(e){}}
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>Math.random().toString(36).slice(2,10);
@@ -2540,7 +2573,7 @@ function testStats(t,list){
   const pending=sc.reduce((x,y)=>x+y.s.pending,0);
   return {sc,n,avg,grades,qs,topics,avgSecs,pending};
 }
-const attemptsOf=c=>D.attempts.filter(a=>a.code===c);
+const attemptsOf=c=>D.attempts.filter(a=>a.code===c&&a.done!==false);
 
 /* ---------- приклад для першого запуску ---------- */
 function seed(){
@@ -2597,8 +2630,10 @@ function render(){
   const w=$("#who");
   w.innerHTML=D.session&&D.acct&&r!=="t"?`<span class="muted">${esc(D.acct.rank?D.acct.rank+" ":"")}${esc(D.acct.name)}</span><button class="sm ghost" data-act="logout">Вийти</button>`:"";
   window.scrollTo(0,0);
-  $("#demobar").hidden=r==="t";
+  $("#demobar").hidden=CLOUD||r==="t";
+  if(!((r==="run"||r==="res")&&arg===subCode))unwatch();
   if(r==="t")return vCadet((arg||"").toUpperCase());
+  if(CLOUD&&!authReady)return app.innerHTML=loading();
   const priv={cab:vCab,edit:vEdit,run:vRun,res:vRes,stats:vStats,lib:vLib,share:vShare};
   if(priv[r]){if(!(D.session&&D.acct))return go("login");return priv[r](arg)}
   if(r==="login")return vLogin(arg);
@@ -2624,34 +2659,47 @@ function vHome(){
       <p class="muted">Створюйте тести до занять, запускайте їх за QR-кодом і отримуйте результати з аналітикою.</p>
       <span class="grow"></span>
       <a class="btn primary big" href="#${D.session&&D.acct?"cab":"login"}">${D.session&&D.acct?"Відкрити кабінет":"Увійти до кабінету"}</a>
-      ${D.acct?"":`<a class="btn" href="#login-new">Створити обліковий запис</a>`}
+      ${D.acct&&(!CLOUD||D.session)?"":`<a class="btn" href="#login-new">Створити обліковий запис</a>`}
     </div>
   </div></div>`;
-  $("#fCode").onsubmit=e=>{e.preventDefault();const c=$("#code").value.trim().toUpperCase();if(D.tests[c])go("t-"+c);else{const m=$("#codeErr");m.hidden=false;m.textContent="Тесту з кодом «"+c+"» не знайдено. Перевірте код або скануйте QR-код ще раз."}};
+  $("#fCode").onsubmit=async e=>{e.preventDefault();const c=$("#code").value.trim().toUpperCase();const m=$("#codeErr");let t=null;
+    try{t=await fetchTest(c)}catch(x){m.hidden=false;m.textContent="Немає зв'язку з сервером. Перевірте інтернет і спробуйте ще раз.";return}
+    if(t)go("t-"+c);else{m.hidden=false;m.textContent="Тесту з кодом «"+c+"» не знайдено. Перевірте код або скануйте QR-код ще раз."}};
 }
 
 /* ---------- вхід ---------- */
 function vLogin(mode){
-  mode=mode||(D.acct?"in":"new");
+  mode=mode||(D.acct||CLOUD?"in":"new");
   const head={in:"Вхід інструктора",new:"Новий обліковий запис інструктора",forgot:"Відновлення пароля"}[mode];
   let body="";
   if(mode==="in")body=`<label for="lEmail">Електронна пошта<input id="lEmail" type="email" autocomplete="username" required></label>
     <label for="lPass">Пароль<input id="lPass" type="password" autocomplete="current-password" required></label>
     <button class="primary big">Увійти</button>
-    <div class="row between small"><a href="#login-forgot">Забули пароль?</a>${D.acct?"":`<a href="#login-new">Створити обліковий запис</a>`}</div>`;
+    <div class="row between small"><a href="#login-forgot">Забули пароль?</a>${D.acct&&!CLOUD?"":`<a href="#login-new">Створити обліковий запис</a>`}</div>`;
   if(mode==="new")body=`<div class="grid2"><label for="nRank">Військове звання<input id="nRank" list="ranks" autocomplete="off"></label>
     <label for="nName">Прізвище та ім'я<input id="nName" required autocomplete="name"></label></div>
     <label for="nEmail">Електронна пошта (на неї прийде лист для відновлення пароля)<input id="nEmail" type="email" autocomplete="username" required></label>
     <label for="nPass">Пароль (щонайменше 6 символів)<input id="nPass" type="password" minlength="6" autocomplete="new-password" required></label>
     <button class="primary big">Створити обліковий запис</button>
     ${D.acct?`<div class="msg warn">На цьому пристрої вже є обліковий запис ${esc(D.acct.email)}. <a href="#login-in">Увійти</a></div>`:""}`;
-  if(mode==="forgot")body=`<div class="msg">У демо-режимі лист не надсилається. Підтвердьте свою пошту й задайте новий пароль тут. Після підключення сервера посилання для відновлення приходитиме на пошту.</div>
+  if(mode==="forgot"&&CLOUD)body=`<p class="muted">Вкажіть пошту облікового запису. Ми надішлемо на неї лист із посиланням, за яким ви задасте новий пароль.</p>
+    <label for="fEmail">Електронна пошта облікового запису<input id="fEmail" type="email" autocomplete="username" required></label>
+    <div id="aOk" class="msg ok" hidden></div>
+    <button class="primary big">Надіслати лист</button><a class="small" href="#login-in">Повернутися до входу</a>`;
+  else if(mode==="forgot")body=`<div class="msg">У демо-режимі лист не надсилається. Підтвердьте свою пошту й задайте новий пароль тут. Після підключення сервера посилання для відновлення приходитиме на пошту.</div>
     <label for="fEmail">Електронна пошта облікового запису<input id="fEmail" type="email" required></label>
     <label for="fPass">Новий пароль<input id="fPass" type="password" minlength="6" autocomplete="new-password" required></label>
     <button class="primary big">Змінити пароль</button><a class="small" href="#login-in">Повернутися до входу</a>`;
   app.innerHTML=`<div class="wrap narrow" style="padding:0"><form class="panel stack" id="fAuth"><h1>${head}</h1><div id="aErr" class="msg err" hidden></div>${body}<datalist id="ranks">${RANKS.map(r=>`<option value="${r}">`).join("")}</datalist></form></div>`;
   const err=t=>{const m=$("#aErr");m.hidden=false;m.textContent=t};
   $("#fAuth").onsubmit=async e=>{e.preventDefault();
+    if(CLOUD){const btn=$("#fAuth button.primary");btn.disabled=true;$("#aErr").hidden=true;
+      try{
+        if(mode==="in")await auth.signInWithEmailAndPassword($("#lEmail").value.trim(),$("#lPass").value);
+        if(mode==="new"){pendingProfile={rank:$("#nRank").value.trim(),name:$("#nName").value.trim()};await auth.createUserWithEmailAndPassword($("#nEmail").value.trim(),$("#nPass").value)}
+        if(mode==="forgot"){await auth.sendPasswordResetEmail($("#fEmail").value.trim());const k=$("#aOk");k.hidden=false;k.textContent="Лист надіслано. Відкрийте пошту й перейдіть за посиланням у листі. Якщо листа немає, перевірте папку «Спам».";btn.disabled=false}
+      }catch(x){pendingProfile=null;btn.disabled=false;if(mode==="forgot"&&x.code==="auth/user-not-found"){const k=$("#aOk");k.hidden=false;k.textContent="Якщо така пошта зареєстрована, лист уже надіслано. Перевірте також папку «Спам»."}else err(authMsg(x))}
+      return}
     if(mode==="in"){if(!D.acct)return err("На цьому пристрої ще немає облікового запису. Створіть його.");
       if($("#lEmail").value.trim().toLowerCase()!==D.acct.email||await hash($("#lPass").value)!==D.acct.pass)return err("Пошта або пароль не збігаються. Перевірте розкладку клавіатури та Caps Lock.");
       D.session=true;save();go("cab")}
@@ -2667,22 +2715,23 @@ function vCab(){
   const list=Object.values(D.tests).sort((a,b)=>b.created-a.created);
   app.innerHTML=`<div class="stack">${tabs("cab")}
   <div class="row between"><h1>Мої тести</h1><button class="primary" data-act="new">+ Створити тест</button></div>
-  ${list.length?list.map(t=>{const n=attemptsOf(t.code).length;return `<div class="tcard">
+  ${list.length?list.map(t=>{const ex=CLOUD&&t.example;const n=CLOUD&&!t.example?(counts[t.code]??"…"):attemptsOf(t.code).length;return `<div class="tcard">
     <div class="grow"><div class="row"><h3>${esc(t.title)}</h3>${t.open?`<span class="pill good">відкритий</span>`:`<span class="pill mut">закритий</span>`}${t.example?`<span class="pill info">приклад</span>`:""}</div>
-      <p class="muted small">${esc(t.topic||"Тема не вказана")} · ${t.questions.length} запитань · ${t.minutes?t.minutes+" хв":"без обмеження часу"} · склали: <b class="num">${n}</b> · код ${t.code}</p></div>
-    <div class="row"><a class="btn primary sm" href="#run-${t.code}">Запустити</a><a class="btn sm" href="#res-${t.code}">Результати</a><a class="btn sm" href="#edit-${t.code}">Редагувати</a><button class="sm" data-act="dup" data-c="${t.code}">Копія</button><button class="sm danger" data-act="del" data-c="${t.code}">Видалити</button></div>
+      <p class="muted small">${esc(t.topic||"Тема не вказана")} · ${t.questions.length} запитань · ${t.minutes?t.minutes+" хв":"без обмеження часу"} · склали: <b class="num" data-cnt="${t.code}">${n}</b>${ex?"":" · код "+t.code}</p></div>
+    <div class="row">${ex?`<a class="btn primary sm" href="#res-${t.code}">Подивитися результати</a><button class="sm" data-act="dup" data-c="${t.code}">Зробити з нього свій тест</button><button class="sm danger" data-act="del" data-c="${t.code}">Прибрати приклад</button>`:`<a class="btn primary sm" href="#run-${t.code}">Запустити</a><a class="btn sm" href="#res-${t.code}">Результати</a><a class="btn sm" href="#edit-${t.code}">Редагувати</a><button class="sm" data-act="dup" data-c="${t.code}">Копія</button><button class="sm danger" data-act="del" data-c="${t.code}">Видалити</button>`}</div>
   </div>`}).join(""):`<div class="panel"><p>Тестів ще немає. Натисніть «Створити тест», додайте запитання до свого заняття і запустіть його за QR-кодом.</p></div>`}
   </div>`;
+  if(CLOUD)list.filter(t=>!t.example&&counts[t.code]===undefined).forEach(async t=>{try{const qs=await tRef(t.code).collection("attempts").where("done","==",true).get();counts[t.code]=qs.size;const el=$(`[data-cnt="${t.code}"]`);if(el)el.textContent=qs.size}catch(e){}});
 }
 
 /* ---------- редактор ---------- */
 let draft=null;
 function blankQ(type="one"){return {id:uid(),type,text:"",tag:"",points:1,options:type==="yn"?[{t:"Так",ok:true},{t:"Ні",ok:false}]:type==="open"?[]:[{t:"",ok:true},{t:"",ok:false},{t:"",ok:false}]}}
 function vEdit(code){
-  if(!draft||draft.code!==code){const t=D.tests[code];if(!t)return go("cab");draft=JSON.parse(JSON.stringify(t))}
+  if(!draft||draft.code!==code){const t=D.tests[code];if(!t||(CLOUD&&t.example))return go("cab");draft=JSON.parse(JSON.stringify(t))}
   const t=draft;
   app.innerHTML=`<form class="stack" id="fEdit">
-  <div class="row between"><h1>${D.tests[code].title?"Редагування тесту":"Новий тест"}</h1><a class="btn sm ghost" href="#cab">← До списку</a></div>
+  <div class="row between"><h1>${draft.isNew?"Новий тест":"Редагування тесту"}</h1><a class="btn sm ghost" href="#cab">← До списку</a></div>
   <div class="panel stack">
     <label for="eTitle">Назва тесту<input id="eTitle" value="${esc(t.title)}" required placeholder="Наприклад: Заходи безпеки при поводженні зі зброєю"></label>
     <label for="eTopic">Тема навчального заняття<input id="eTopic" value="${esc(t.topic)}"></label>
@@ -2720,8 +2769,10 @@ function vEdit(code){
   const f=$("#fEdit");
   f.oninput=e=>{pull()};
   f.onchange=e=>{pull();if(e.target.dataset.f==="type"){const i=+e.target.closest(".q").dataset.q;const q=draft.questions[i];const nq=blankQ(q.type);q.options=q.type==="yn"||q.type==="open"?nq.options:(q.options.length>=2&&q.options.some(o=>o.t!=="Так")?q.options:nq.options);if(q.type==="one"){let seen=false;q.options.forEach(o=>{if(o.ok&&!seen)seen=true;else o.ok=false});if(!seen&&q.options[0])q.options[0].ok=true}vEdit(code)}};
-  f.onsubmit=e=>{e.preventDefault();pull();const err=validate(draft);const m=$("#eErr");if(err){m.hidden=false;m.textContent=err;m.scrollIntoView({block:"center"});return}
-    D.tests[code]=JSON.parse(JSON.stringify(draft));delete D.tests[code].example;save();draft=null;toast("Тест збережено");go("cab")};
+  f.onsubmit=async e=>{e.preventDefault();pull();const err=validate(draft);const m=$("#eErr");if(err){m.hidden=false;m.textContent=err;m.scrollIntoView({block:"center"});return}
+    const nt=JSON.parse(JSON.stringify(draft));delete nt.example;delete nt.isNew;
+    if(CLOUD){const btn=$("#fEdit button.primary.big");btn.disabled=true;try{await cloudSaveTest(nt);publishResults(code)}catch(x){btn.disabled=false;m.hidden=false;m.textContent="Не вдалося зберегти тест. Перевірте інтернет і спробуйте ще раз.";return}}
+    D.tests[code]=nt;save();draft=null;toast("Тест збережено");go("cab")};
 }
 function pull(){ // зчитати форму в чернетку
   if(!draft||!$("#fEdit"))return;const t=draft;
@@ -2748,7 +2799,7 @@ function validate(t){
 
 /* ---------- запуск: QR і посилання ---------- */
 function vRun(code){
-  const t=D.tests[code];if(!t)return go("cab");const url=testUrl(code);
+  const t=D.tests[code];if(!t||(CLOUD&&t.example))return go("cab");const url=testUrl(code);watch(code);
   app.innerHTML=`<div class="stack">
   <div class="row between"><div><span class="tag">Запуск тесту</span><h1>${esc(t.title)}</h1></div><a class="btn sm ghost" href="#cab">← До списку</a></div>
   ${t.open?"":`<div class="msg warn">Тест закритий: курсанти побачать повідомлення, що доступ зачинено. Відкрийте його перед заняттям.</div>`}
@@ -2770,7 +2821,9 @@ function vRun(code){
 /* ---------- результати тесту ---------- */
 let resFilter="";
 function vRes(code){
-  const t=D.tests[code];if(!t)return go("cab");
+  const t=D.tests[code];if(!t)return go("cab");watch(code);
+  if(CLOUD&&!t.example&&!loaded[code])return app.innerHTML=loading("Завантажую результати…");
+  const undone=D.attempts.filter(a=>a.code===code&&a.done===false).length;
   const all=attemptsOf(code);const groups=[...new Set(all.map(a=>a.group).filter(Boolean))].sort();
   if(resFilter&&!groups.includes(resFilter))resFilter="";
   const list=resFilter?all.filter(a=>a.group===resFilter):all;
@@ -2787,12 +2840,13 @@ function vRes(code){
     <div class="kpi"><b>${fmtTime(S.avgSecs)}</b><span>середній час</span></div>
   </div>
   ${top&&top.wrong?`<div class="msg warn">Найбільше помилок — <b>${esc(top.k)}</b>: ${top.rate}% неправильних відповідей.</div>`:`<div class="msg ok">Помилок у закритих запитаннях немає.</div>`}
+  ${undone?`<div class="msg noprint">Почали тест і ще не завершили: <b class="num">${undone}</b>.</div>`:""}
   ${S.pending?`<div class="msg noprint">Є неперевірені відкриті відповіді: ${S.pending}. Оцініть їх нижче — до того результат попередній.</div>`:""}
   <div class="row noprint">${groups.length>1?`<label for="rGroup" style="flex-direction:row;align-items:center;gap:8px">Група / взвод<select id="rGroup" style="width:auto"><option value="">усі</option>${groups.map(g=>`<option ${g===resFilter?"selected":""}>${esc(g)}</option>`).join("")}</select></label>`:""}
     <span class="grow"></span><button data-act="xlsx" data-c="${code}">Експорт в Excel</button><button data-act="print">Друк / зберегти PDF</button></div>
   <h2>Рейтинг курсантів</h2>
   <div class="tablebox"><table><thead><tr><th class="r">№</th><th>Звання</th><th>ПІБ</th><th>Група / взвод</th><th class="r">Бали</th><th class="r">%</th><th>Оцінка</th><th class="r">Час</th><th>Завершено</th></tr></thead><tbody>
-  ${rank.map((x,i)=>`<tr><td class="r">${i+1}</td><td>${esc(x.a.rank)}</td><td>${esc(x.a.name)}</td><td>${esc(x.a.group||"—")}</td><td class="r">${x.s.pts}/${x.s.max}</td><td class="r">${x.s.pct}</td><td><span class="pill ${gradeCls(x.s.grade)}">${x.s.grade}</span>${x.s.pending?` <span class="pill mut">попередньо</span>`:""}</td><td class="r">${fmtTime(x.a.secs)}</td><td class="num">${fmtDate(x.a.finished)}</td></tr>`).join("")}
+  ${rank.map((x,i)=>`<tr><td class="r">${i+1}</td><td>${esc(x.a.rank)}</td><td>${esc(x.a.name)}</td><td>${esc(x.a.group||"—")}</td><td class="r">${x.s.pts}/${x.s.max}</td><td class="r">${x.s.pct}</td><td><span class="pill ${gradeCls(x.s.grade)}">${x.s.grade}</span>${x.s.pending?` <span class="pill mut">попередньо</span>`:""}</td><td class="r">${fmtTime(x.a.secs)}${t.minutes&&x.a.secs>t.minutes*60+30?` <span class="pill bad">понад час</span>`:""}</td><td class="num">${fmtDate(x.a.finished)}</td></tr>`).join("")}
   </tbody></table></div>
   <div class="hero">
     <div class="panel stack"><h3>Помилки за темами</h3><div class="bars">${S.topics.map(x=>`<div class="bar"><span class="lab">${esc(x.k)}</span><span class="track"><span class="fill bad" style="width:${x.rate}%;display:block"></span></span><span class="val">${x.rate}%</span></div>`).join("")||`<p class="muted small">Немає закритих запитань.</p>`}</div></div>
@@ -2801,10 +2855,12 @@ function vRes(code){
   ${openQs.length?`<h2 class="noprint">Перевірка відкритих відповідей</h2>${openQs.map(q=>`<div class="panel stack noprint"><p><b>${esc(q.text)}</b> <span class="muted small">(до ${q.points} б.)</span></p>
     ${list.map(a=>{const m=a.manual&&a.manual[q.id];return `<div class="row" style="align-items:flex-start;border-top:1px solid var(--line);padding-top:10px"><div class="grow"><span class="small muted">${esc(a.rank)} ${esc(a.name)}</span><p>${esc(a.answers[q.id]||"— без відповіді —")}</p></div>
       <label for="m${a.id}${q.id}" style="width:110px">Бали<input id="m${a.id}${q.id}" type="number" min="0" max="${q.points}" value="${m??""}" data-man="${a.id}" data-q="${q.id}" placeholder="0–${q.points}"></label></div>`}).join("")}</div>`).join("")}`:""}
-  `:`<div class="panel stack"><p>Цей тест ще ніхто не склав. Запустіть його і покажіть курсантам QR-код.</p><div><a class="btn primary" href="#run-${code}">Запустити тест</a></div></div>`}
+  `:`${undone?`<div class="msg">Почали тест і ще не завершили: <b class="num">${undone}</b>.</div>`:""}<div class="panel stack"><p>Цей тест ще ніхто не склав. Запустіть його і покажіть курсантам QR-код.</p><div><a class="btn primary" href="#run-${code}">Запустити тест</a></div></div>`}
   </div>`;
   const g=$("#rGroup");if(g)g.onchange=()=>{resFilter=g.value;vRes(code)};
-  $$("[data-man]").forEach(inp=>inp.onchange=()=>{const a=D.attempts.find(x=>x.id===inp.dataset.man);if(!a)return;a.manual=a.manual||{};if(inp.value==="")delete a.manual[inp.dataset.q];else a.manual[inp.dataset.q]=Math.max(0,Math.min(+inp.max,+inp.value));save();const y=window.scrollY;vRes(code);window.scrollTo(0,y);toast("Оцінку збережено")});
+  $$("[data-man]").forEach(inp=>inp.onchange=()=>{const a=D.attempts.find(x=>x.id===inp.dataset.man);if(!a)return;a.manual=a.manual||{};const nv=inp.value===""?undefined:Math.max(0,Math.min(+inp.max,+inp.value));if(a.manual[inp.dataset.q]===nv)return;if(inp.value==="")delete a.manual[inp.dataset.q];else a.manual[inp.dataset.q]=Math.max(0,Math.min(+inp.max,+inp.value));save();
+    if(CLOUD&&!t.example){tRef(code).collection("attempts").doc(a.id).update({manual:a.manual}).catch(()=>toast("Не вдалося зберегти оцінку. Перевірте інтернет."));publishResults(code)}
+    const y=window.scrollY;setTimeout(()=>{if(location.hash==="#res-"+code){vRes(code);window.scrollTo(0,y)}toast("Оцінку збережено")},0)});
 }
 function loadScript(src){return new Promise((ok,no)=>{if(window.XLSX)return ok();const s=document.createElement("script");s.src=src;s.onload=ok;s.onerror=no;document.head.append(s)})}
 async function exportXlsx(code){
@@ -2823,8 +2879,12 @@ async function exportXlsx(code){
 
 /* ---------- аналітика роботи інструктора ---------- */
 let statQ="";
+let statsBusy=false;
 function vStats(){
-  const tests=Object.values(D.tests).sort((a,b)=>a.created-b.created);
+  if(CLOUD&&Object.values(D.tests).some(t=>!t.example&&!loaded[t.code])){app.innerHTML=`<div class="stack">${tabs("stats")}${loading("Завантажую результати…")}</div>`;
+    if(!statsBusy){statsBusy=true;loadAllAttempts().then(()=>{statsBusy=false;if(location.hash==="#stats")vStats()},()=>{statsBusy=false;app.innerHTML=`<div class="stack">${tabs("stats")}<div class="msg err">Не вдалося завантажити результати. Перевірте інтернет і відкрийте вкладку ще раз.</div></div>`})}return}
+  const real=Object.values(D.tests).some(t=>!t.example&&attemptsOf(t.code).length);
+  const tests=Object.values(D.tests).filter(t=>!(CLOUD&&t.example&&real)).sort((a,b)=>a.created-b.created);
   const per=tests.map(t=>({t,S:testStats(t,attemptsOf(t.code))})).filter(x=>x.S.n);
   const allSc=per.flatMap(x=>x.S.sc.map(y=>({...y,t:x.t})));
   const n=allSc.length,avg=n?Math.round(allSc.reduce((a,b)=>a+b.s.pct,0)/n):0;
@@ -2887,11 +2947,14 @@ function vShare(){
 /* ---------- курсант ---------- */
 const RUNKEY="zalik.run";let run=null;
 function shuffle(a){a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a}
+let cadetMiss={};
 function vCadet(code){
-  const t=D.tests[code];
+  let t=D.tests[code];if(CLOUD&&t&&t.example)t=null;
+  if(!t&&CLOUD&&!cadetMiss[code]){app.innerHTML=`<div class="wrap narrow" style="padding:0">${loading("Завантажую тест…")}</div>`;
+    fetchTest(code).then(x=>{if(!x)cadetMiss[code]=1;if(location.hash.slice(1).toUpperCase()==="T-"+code)vCadet(code)},()=>{app.innerHTML=`<div class="wrap narrow" style="padding:0"><div class="panel stack"><h1>Немає зв'язку</h1><p>Не вдалося завантажити тест. Перевірте інтернет.</p><div><button class="primary" data-act="reload">Спробувати ще раз</button></div></div></div>`});return}
   if(!t)return app.innerHTML=`<div class="wrap narrow stack" style="padding:0"><div class="panel stack"><h1>Тест не знайдено</h1><p>Код «${esc(code)}» не збігається з жодним тестом. Скануйте QR-код ще раз або попросіть інструктора надіслати посилання.</p><div><a class="btn" href="#">На головну</a></div></div></div>`;
   try{const r=JSON.parse(sessionStorage.getItem(RUNKEY));if(r&&r.code===code&&!r.done)run=r}catch(e){}
-  if(run&&run.code===code&&!run.done)return vTest(t);
+  if(run&&run.code===code&&!run.done){if(run.failed)return finishCloud(t,run.auto);return vTest(t)}
   if(!t.open)return app.innerHTML=`<div class="wrap narrow" style="padding:0"><div class="panel stack"><h1>Тест закрито</h1><p>Інструктор ще не відкрив або вже закрив доступ до тесту «${esc(t.title)}».</p></div></div>`;
   app.innerHTML=`<div class="wrap narrow" style="padding:0"><form class="panel stack" id="fCad">
     <div><span class="tag">Залік</span><h1>${esc(t.title)}</h1><p class="muted">${esc(t.topic||"")}</p></div>
@@ -2903,10 +2966,20 @@ function vCadet(code){
     <button class="primary big">Почати тест</button>
     ${t.minutes?`<p class="muted small">Відлік часу почнеться одразу після натискання. Коли час спливе, тест завершиться сам.</p>`:""}
   </form></div>`;
-  $("#fCad").onsubmit=e=>{e.preventDefault();const name=$("#cName").value.trim().replace(/\s+/g," "),group=$("#cGroup").value.trim();
-    if(t.attempts){const used=attemptsOf(code).filter(a=>a.name.toLowerCase()===name.toLowerCase()&&(a.group||"").toLowerCase()===group.toLowerCase()).length;if(used>=t.attempts){const m=$("#cErr");m.hidden=false;m.textContent="Ви вже використали всі спроби ("+t.attempts+"). Зверніться до інструктора.";return}}
+  $("#fCad").onsubmit=async e=>{e.preventDefault();const name=$("#cName").value.trim().replace(/\s+/g," "),group=$("#cGroup").value.trim();
+    let cloudRun=null;
+    if(CLOUD){const btn=$("#fCad button.primary"),m=$("#cErr");btn.disabled=true;m.hidden=true;
+      try{const r=tRef(code);
+        const live=await r.get();if(!live.exists||!live.data().open){m.hidden=false;m.textContent="Інструктор закрив доступ до цього тесту.";btn.disabled=false;return}
+        if(t.attempts){const h=(await hash(code+"|"+name.toLowerCase()+"|"+group.toLowerCase())).slice(0,24);let got=false;
+          for(let i=0;i<t.attempts&&!got;i++){try{await r.collection("slots").doc(h+"_"+i).set({at:TS()});got=true}catch(x){if(x.code!=="permission-denied")throw x}}
+          if(!got){m.hidden=false;m.textContent="Ви вже використали всі спроби ("+t.attempts+"). Зверніться до інструктора.";btn.disabled=false;return}}
+        const key=uid()+uid();const ref=r.collection("attempts").doc();
+        await ref.set({code,rank:$("#cRank").value,name,group,started:TS(),key,done:false});cloudRun={att:ref.id,key};
+      }catch(x){m.hidden=false;m.textContent="Не вдалося почати тест. Перевірте інтернет і натисніть ще раз.";btn.disabled=false;return}}
+    else if(t.attempts){const used=attemptsOf(code).filter(a=>a.name.toLowerCase()===name.toLowerCase()&&(a.group||"").toLowerCase()===group.toLowerCase()).length;if(used>=t.attempts){const m=$("#cErr");m.hidden=false;m.textContent="Ви вже використали всі спроби ("+t.attempts+"). Зверніться до інструктора.";return}}
     const order=(t.shuffleQ?shuffle(t.questions):t.questions).map(q=>q.id);const oo={};t.questions.forEach(q=>{const idx=q.options.map((_,i)=>i);oo[q.id]=t.shuffleO&&q.type!=="yn"?shuffle(idx):idx});
-    run={code,rank:$("#cRank").value,name,group,started:Date.now(),order,oo,answers:{},i:0};keep();vTest(t)};
+    run={code,rank:$("#cRank").value,name,group,started:Date.now(),order,oo,answers:{},i:0,...(cloudRun||{})};keep();vTest(t)};
 }
 function keep(){try{sessionStorage.setItem(RUNKEY,JSON.stringify(run))}catch(e){}}
 function vTest(t){
@@ -2925,7 +2998,25 @@ function vTest(t){
   app.firstElementChild.oninput=rec;run._rec=rec;
   if(t.minutes){const end=run.started+t.minutes*60000;const upd=()=>{const left=(end-Date.now())/1000;const el=$("#tm");if(el){el.textContent=fmtTime(left);el.classList.toggle("low",left<60)}if(left<=0){clearInterval(tick);finish(t,true)}};upd();tick=setInterval(upd,500)}
 }
+let resUnsub=null;
+async function finishCloud(t,auto){
+  if(!run||run.done||run.sending)return;if(run._rec&&$("input[name=ans],#aOpen"))run._rec();
+  run.sending=true;run.auto=auto;clearInterval(tick);const ref=tRef(t.code).collection("attempts").doc(run.att);
+  app.innerHTML=`<div class="wrap narrow" style="padding:0">${loading("Надсилаю відповіді…")}</div>`;
+  try{await ref.update({done:true,answers:run.answers,finished:TS()})}
+  catch(x){run.sending=false;let sent=false;try{const d=await ref.get();sent=d.exists&&d.data().done===true}catch(y){}
+    if(!sent){run.failed=true;keep();app.innerHTML=`<div class="wrap narrow" style="padding:0"><div class="panel stack"><h1>Відповіді ще не надіслано</h1><p>Немає зв'язку з сервером. Ваші відповіді збережено на цьому пристрої. Перевірте інтернет і натисніть кнопку. Не закривайте сторінку.</p><div><button class="primary big" data-act="resend">Надіслати ще раз</button></div></div></div>`;return}}
+  const me={rank:run.rank,name:run.name};run.done=true;try{sessionStorage.removeItem(RUNKEY)}catch(e){}run=null;
+  const show=r=>{app.innerHTML=`<div class="wrap narrow" style="padding:0"><div class="panel stack" style="text-align:center;align-items:center">
+    <span class="tag">${auto?"Час вийшов — тест завершено":"Відповіді надіслано"}</span><h1>${esc(t.title)}</h1>
+    ${r?`<div class="score">${r.pct}%</div><span class="pill ${gradeCls(r.grade)}" style="font-size:1rem;padding:4px 16px">${r.grade}</span>
+      <p>${esc(me.rank)} ${esc(me.name)} · балів: <b class="num">${r.pts} з ${r.max}</b></p>${r.pending?`<div class="msg">Результат попередній: відкриті відповіді (${r.pending}) перевірить інструктор.</div>`:""}`
+     :`<p>${esc(me.rank)} ${esc(me.name)}, ваші відповіді отримано.</p><div class="msg">Результат з'явиться на цьому екрані, щойно його зарахує інструктор. Сторінку можна закрити: результат уже в інструктора.</div>`}
+  </div></div>`};
+  show(null);if(resUnsub)resUnsub();resUnsub=ref.onSnapshot(d=>{const r=d.exists&&d.data().res;if(r)show(r)},()=>{});
+}
 function finish(t,auto){
+  if(CLOUD&&run&&run.att)return finishCloud(t,auto);
   if(!run||run.done)return;if(run._rec&&$("input[name=ans],#aOpen"))run._rec();
   const now=Date.now();let secs=Math.round((now-run.started)/1000);if(t.minutes)secs=Math.min(secs,t.minutes*60);
   const at={id:uid(),code:t.code,rank:run.rank,name:run.name,group:run.group,started:run.started,finished:now,secs,answers:run.answers,manual:{}};
@@ -2946,13 +3037,18 @@ function finish(t,auto){
 let delArm=null;
 document.addEventListener("click",e=>{
   const b=e.target.closest("[data-act]");if(!b)return;const act=b.dataset.act,c=b.dataset.c;
-  if(act==="logout"){D.session=false;save();go("")}
+  if(act==="logout"){if(CLOUD){auth.signOut();return}D.session=false;save();go("")}
+  if(act==="reload")render();
+  if(act==="resend"&&run){run.sending=false;finishCloud(D.tests[run.code],run.auto);return}
   if(act==="copy")copy(b.dataset.v);
-  if(act==="new"){const code=newCode();D.tests[code]={code,title:"",topic:"",minutes:10,attempts:1,shuffleQ:true,shuffleO:true,scale:{a:90,b:75,c:60},open:true,created:Date.now(),questions:[blankQ()]};save();draft=null;go("edit-"+code)}
-  if(act==="dup"){const code=newCode();const t=JSON.parse(JSON.stringify(D.tests[c]));t.code=code;t.title=t.title.replace(/^Приклад: /,"")+" (копія)";t.created=Date.now();delete t.example;t.questions.forEach(q=>q.id=uid());D.tests[code]=t;save();toast("Копію створено");vCab()}
+  if(act==="new"){b.disabled=true;freeCode().then(code=>{draft={code,isNew:true,title:"",topic:"",minutes:10,attempts:1,shuffleQ:true,shuffleO:true,scale:{a:90,b:75,c:60},open:true,created:Date.now(),questions:[blankQ()]};go("edit-"+code)},()=>{b.disabled=false;toast("Немає зв'язку з сервером")});return}
+  if(act==="dup"){b.disabled=true;(async()=>{const code=await freeCode();const t=JSON.parse(JSON.stringify(D.tests[c]));t.code=code;t.title=t.title.replace(/^Приклад: /,"")+" (копія)";t.created=Date.now();delete t.example;delete t.remote;t.questions.forEach(q=>q.id=uid());if(CLOUD){await cloudSaveTest(t);counts[code]=0;loaded[code]=true}D.tests[code]=t;save();toast("Копію створено");vCab()})().catch(()=>{b.disabled=false;toast("Не вдалося створити копію. Перевірте інтернет.")});return}
   if(act==="del"){if(delArm!==c){delArm=c;b.textContent="Точно видалити?";b.classList.add("primary");setTimeout(()=>{if(delArm===c){delArm=null;if(document.body.contains(b)){b.textContent="Видалити";b.classList.remove("primary")}}},4000);return}
-    delete D.tests[c];D.attempts=D.attempts.filter(a=>a.code!==c);delArm=null;save();toast("Тест видалено");vCab()}
-  if(act==="toggle"){D.tests[c].open=!D.tests[c].open;save();vRun(c)}
+    delArm=null;const ex=D.tests[c].example;
+    if(CLOUD&&!ex){b.disabled=true;cloudDeleteTest(c).then(()=>{delete D.tests[c];D.attempts=D.attempts.filter(a=>a.code!==c);toast("Тест видалено");vCab()},()=>{b.disabled=false;toast("Не вдалося видалити. Перевірте інтернет.")});return}
+    if(CLOUD&&ex){try{localStorage.setItem("zalik.noex","1")}catch(e){}}
+    delete D.tests[c];D.attempts=D.attempts.filter(a=>a.code!==c);save();toast(ex?"Приклад прибрано":"Тест видалено");vCab()}
+  if(act==="toggle"){const v=!D.tests[c].open;if(CLOUD){b.disabled=true;tRef(c).update({open:v}).then(()=>{D.tests[c].open=v;vRun(c)},()=>{b.disabled=false;toast("Не вдалося змінити доступ. Перевірте інтернет.")});return}D.tests[c].open=v;save();vRun(c)}
   if(act==="xlsx")exportXlsx(c);
   if(act==="print")window.print();
   if(draft&&/^(q|o)/.test(act)){pull();const i=+b.dataset.i,Q=draft.questions;
@@ -2969,7 +3065,16 @@ document.addEventListener("click",e=>{
     if(act==="unask")$("#fin").hidden=true;
     if(act==="finish")finish(t,false)}
 });
-render();
+if(CLOUD){auth.onAuthStateChanged(async u=>{
+  if(u){let prof=pendingProfile;pendingProfile=null;
+    try{const ref=db.collection("users").doc(u.uid);if(prof)await ref.set(prof);else prof=(await ref.get()).data()||{}}catch(e){prof=prof||{}}
+    D.acct={rank:prof.rank||"",name:prof.name||u.email,email:u.email};D.session=true;
+    let noex=false;try{noex=localStorage.getItem("zalik.noex")==="1"}catch(e){}
+    if(!noex&&!D.tests.ZRAZOK)seed();
+    try{await cloudLoadTests()}catch(e){toast("Не вдалося завантажити тести. Перевірте інтернет.")}
+    authReady=true;const h=location.hash.slice(1);if(!h||h.startsWith("login"))go("cab");else render()}
+  else{const was=D.session;unwatch();D={acct:null,session:false,tests:{},attempts:[]};loaded={};counts={};authReady=true;if(was)go("");else render()}
+})}else render();
 </script>
 </body>
 </html>

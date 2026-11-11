@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+
+    // Профіль інструктора: бачить і змінює лише він сам
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /tests/{code} {
+      function testDoc() { return get(/databases/$(db)/documents/tests/$(code)).data; }
+      function owns() { return signedIn() && testDoc().owner == request.auth.uid; }
+
+      // Запитання (без правильних відповідей) курсант отримує за кодом тесту
+      allow get: if true;
+      allow list: if signedIn() && resource.data.owner == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.owner == request.auth.uid;
+      allow update: if signedIn() && resource.data.owner == request.auth.uid
+                    && request.resource.data.owner == request.auth.uid;
+      allow delete: if signedIn() && resource.data.owner == request.auth.uid;
+
+      // Правильні відповіді: лише власник тесту
+      match /private/{d} {
+        allow read, write: if owns();
+      }
+
+      // Лічильник спроб: курсант може лише зайняти вільний слот
+      match /slots/{id} {
+        allow create: if testDoc().open == true
+                      && request.resource.data.keys().hasOnly(['at'])
+                      && request.resource.data.at == request.time;
+        allow read, delete: if owns();
+      }
+
+      // Спроба курсанта
+      match /attempts/{id} {
+        allow get: if true;
+        allow list: if owns();
+        allow create: if testDoc().open == true
+          && request.resource.data.keys().hasOnly(['code','rank','name','group','started','key','done'])
+          && request.resource.data.code == code
+          && request.resource.data.done == false
+          && request.resource.data.started == request.time
+          && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 120
+          && request.resource.data.rank is string && request.resource.data.rank.size() <= 40
+          && request.resource.data.group is string && request.resource.data.group.size() <= 60
+          && request.resource.data.key is string && request.resource.data.key.size() <= 40;
+        allow update: if owns() || (
+          resource.data.done == false
+          && request.resource.data.done == true
+          && request.resource.data.key == resource.data.key
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['done','answers','finished'])
+          && request.resource.data.answers is map && request.resource.data.answers.size() <= 300
+          && request.resource.data.finished == request.time);
+        allow delete: if owns();
+      }
+    }
+  }
+}
