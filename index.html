@@ -129,6 +129,13 @@ td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
 /* editor */
 .q{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:flex;flex-direction:column;gap:12px}
 .opt{display:flex;gap:10px;align-items:center}
+.q.bad{border-color:var(--bad);box-shadow:0 0 0 3px rgba(229,87,61,.18)}
+.q.fresh{border-color:var(--brass);box-shadow:0 0 0 3px rgba(242,163,58,.16)}
+.addq{border:2px dashed var(--line);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;gap:12px}
+.addq details{border-top:1px solid var(--line);padding-top:12px}
+.addq summary{cursor:pointer;font-weight:600;color:var(--brass)}
+.addq pre{font:.84rem/1.5 ui-monospace,Menlo,Consolas,monospace;background:#0D100A;border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;white-space:pre-wrap;color:var(--muted);margin:0}
+.savebar{position:sticky;bottom:0;z-index:6;background:#0B0D09;border:1px solid var(--line);border-radius:var(--r) var(--r) 0 0;padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));display:flex;flex-wrap:wrap;gap:10px;align-items:center;box-shadow:0 -10px 30px rgba(0,0,0,.5)}
 .opt input[type=text]{flex:1;min-width:0}
 
 /* run */
@@ -2725,12 +2732,12 @@ function vCab(){
 }
 
 /* ---------- редактор ---------- */
-let draft=null;
+let draft=null,editFocus=null;
 function blankQ(type="one"){return {id:uid(),type,text:"",tag:"",points:1,options:type==="yn"?[{t:"Так",ok:true},{t:"Ні",ok:false}]:type==="open"?[]:[{t:"",ok:true},{t:"",ok:false},{t:"",ok:false}]}}
 function vEdit(code){
   if(!draft||draft.code!==code){const t=D.tests[code];if(!t||(CLOUD&&t.example))return go("cab");draft=JSON.parse(JSON.stringify(t))}
   const t=draft;
-  app.innerHTML=`<form class="stack" id="fEdit">
+  app.innerHTML=`<form class="stack" id="fEdit" novalidate>
   <div class="row between"><h1>${draft.isNew?"Новий тест":"Редагування тесту"}</h1><a class="btn sm ghost" href="#cab">← До списку</a></div>
   <div class="panel stack">
     <label for="eTitle">Назва тесту<input id="eTitle" value="${esc(t.title)}" required placeholder="Наприклад: Заходи безпеки при поводженні зі зброєю"></label>
@@ -2750,7 +2757,7 @@ function vEdit(code){
   </div>
   <h2>Запитання (${t.questions.length})</h2>
   ${t.questions.map((q,i)=>`<div class="q" data-q="${i}">
-    <div class="row between"><span class="tag">Запитання ${i+1}</span><div class="row"><button type="button" class="sm" data-act="qup" data-i="${i}" ${i?"":"disabled"} aria-label="Вище">↑</button><button type="button" class="sm" data-act="qdown" data-i="${i}" ${i<t.questions.length-1?"":"disabled"} aria-label="Нижче">↓</button><button type="button" class="sm danger" data-act="qdel" data-i="${i}">Видалити</button></div></div>
+    <div class="row between"><span class="tag">Запитання ${i+1}</span><div class="row"><button type="button" class="sm" data-act="qup" data-i="${i}" ${i?"":"disabled"} aria-label="Вище">↑</button><button type="button" class="sm" data-act="qdown" data-i="${i}" ${i<t.questions.length-1?"":"disabled"} aria-label="Нижче">↓</button><button type="button" class="sm" data-act="qdup" data-i="${i}">Дублювати</button><button type="button" class="sm danger" data-act="qdel" data-i="${i}">Видалити</button></div></div>
     <label for="qt${i}">Текст запитання<textarea id="qt${i}" data-f="text" required>${esc(q.text)}</textarea></label>
     <div class="grid2">
       <label for="qy${i}">Тип<select id="qy${i}" data-f="type">${Object.entries(TYPES).map(([k,v])=>`<option value="${k}" ${k===q.type?"selected":""}>${v}</option>`).join("")}</select></label>
@@ -2760,16 +2767,37 @@ function vEdit(code){
     ${q.type==="open"?`<p class="muted small">Курсант пише відповідь сам. Ви оцінюєте її вручну в результатах.</p>`:
       `<div class="stack" style="gap:8px"><span class="muted small">${q.type==="multi"?"Позначте всі правильні відповіді":"Позначте правильну відповідь"}</span>
       ${q.options.map((o,j)=>`<div class="opt"><input type="${q.type==="multi"?"checkbox":"radio"}" name="ok${i}" data-ok="${j}" ${o.ok?"checked":""} aria-label="Правильна відповідь ${j+1}"><input type="text" id="qo${i}_${j}" data-o="${j}" value="${esc(o.t)}" placeholder="Варіант ${j+1}" ${q.type==="yn"?"readonly":"required"}>${q.type!=="yn"&&q.options.length>2?`<button type="button" class="sm danger" data-act="odel" data-i="${i}" data-j="${j}" aria-label="Видалити варіант">✕</button>`:""}</div>`).join("")}
-      ${q.type!=="yn"?`<div><button type="button" class="sm" data-act="oadd" data-i="${i}">+ Варіант</button></div>`:""}</div>`}
+      ${q.type!=="yn"?`<div><button type="button" class="sm" data-act="oadd" data-i="${i}">+ Додати варіант відповіді</button></div>`:""}</div>`}
   </div>`).join("")}
-  <div class="row"><button type="button" data-act="qadd" data-t="one">+ Одна відповідь</button><button type="button" data-act="qadd" data-t="multi">+ Кілька відповідей</button><button type="button" data-act="qadd" data-t="yn">+ Так / Ні</button><button type="button" data-act="qadd" data-t="open">+ Відкрите</button></div>
+  <div class="addq" id="addq">
+    <div><h3>Додати запитання ${t.questions.length+1}</h3><p class="muted small">Оберіть тип наступного запитання. Кількість запитань і варіантів відповіді не обмежена.</p></div>
+    <div class="row"><button type="button" class="primary" data-act="qadd" data-t="one">+ З однією правильною відповіддю</button><button type="button" data-act="qadd" data-t="multi">+ З кількома правильними</button><button type="button" data-act="qadd" data-t="yn">+ Так / Ні</button><button type="button" data-act="qadd" data-t="open">+ Відкрите запитання</button></div>
+    <details id="bulkBox"><summary>Вставити багато запитань одразу списком</summary>
+      <div class="stack" style="margin-top:12px">
+        <p class="muted small">Скопіюйте запитання з Word або нотаток. Кожне запитання з нового абзацу: перший рядок — текст запитання, далі варіанти. Перед правильним варіантом поставте зірочку. Запитання без варіантів стане відкритим.</p>
+        <pre>Чому дорівнює азимут напрямку на схід?
+0°
+*90°
+180°
+
+Горизонталі показують висоту місцевості.
+*Так
+Ні</pre>
+        <label for="bulk">Список запитань<textarea id="bulk" rows="8" placeholder="Вставте запитання сюди"></textarea></label>
+        <div><button type="button" class="primary" data-act="qbulk">Додати запитання зі списку</button></div>
+      </div></details>
+  </div>
   <div id="eErr" class="msg err" hidden></div>
-  <div class="row"><button class="primary big">Зберегти тест</button><a class="btn big ghost" href="#cab">Скасувати</a></div>
+  <div class="savebar"><span class="muted">Запитань: <b class="num" style="color:var(--fg)">${t.questions.length}</b></span><span class="grow"></span><button type="button" data-act="qadd" data-t="one">+ Додати запитання</button><a class="btn ghost" href="#cab">Скасувати</a><button class="primary big">Зберегти тест</button></div>
   </form>`;
+  if(editFocus!==null){const box=$(`.q[data-q="${editFocus}"]`);editFocus=null;if(box){box.classList.add("fresh");box.scrollIntoView({block:"center"});const ta=$("textarea",box);if(ta)ta.focus({preventScroll:true})}}
   const f=$("#fEdit");
   f.oninput=e=>{pull()};
   f.onchange=e=>{pull();if(e.target.dataset.f==="type"){const i=+e.target.closest(".q").dataset.q;const q=draft.questions[i];const nq=blankQ(q.type);q.options=q.type==="yn"||q.type==="open"?nq.options:(q.options.length>=2&&q.options.some(o=>o.t!=="Так")?q.options:nq.options);if(q.type==="one"){let seen=false;q.options.forEach(o=>{if(o.ok&&!seen)seen=true;else o.ok=false});if(!seen&&q.options[0])q.options[0].ok=true}vEdit(code)}};
-  f.onsubmit=async e=>{e.preventDefault();pull();const err=validate(draft);const m=$("#eErr");if(err){m.hidden=false;m.textContent=err;m.scrollIntoView({block:"center"});return}
+  f.onsubmit=async e=>{e.preventDefault();pull();const emptyQ=q=>!q.text.trim()&&(q.type==="open"||q.type==="yn"||q.options.every(o=>!o.t.trim()));
+    const kept=draft.questions.filter(q=>!emptyQ(q));if(kept.length&&kept.length!==draft.questions.length){draft.questions=kept;vEdit(code);return $("#fEdit").requestSubmit()}
+    const [err,bad]=validate(draft);const m=$("#eErr");$$(".q.bad").forEach(x=>x.classList.remove("bad"));
+    if(err){m.hidden=false;m.textContent=err;const box=bad>=0?$(`.q[data-q="${bad}"]`):null;if(box){box.classList.add("bad");box.scrollIntoView({block:"center"})}else window.scrollTo(0,0);toast("Тест не збережено: "+(bad>=0?"перевірте запитання "+(bad+1):"перевірте налаштування"));return}
     const nt=JSON.parse(JSON.stringify(draft));delete nt.example;delete nt.isNew;
     if(CLOUD){const btn=$("#fEdit button.primary.big");btn.disabled=true;try{await cloudSaveTest(nt);publishResults(code)}catch(x){btn.disabled=false;m.hidden=false;m.textContent="Не вдалося зберегти тест. Перевірте інтернет і спробуйте ще раз.";return}}
     D.tests[code]=nt;save();draft=null;toast("Тест збережено");go("cab")};
@@ -2784,19 +2812,32 @@ function pull(){ // зчитати форму в чернетку
     $$("[data-ok]",box).forEach(inp=>{const o=q.options[+inp.dataset.ok];if(o)o.ok=inp.checked})});
 }
 function validate(t){
-  if(!t.title)return "Вкажіть назву тесту.";
-  if(!t.questions.length)return "Додайте хоча б одне запитання.";
-  if(!(t.scale.a>t.scale.b&&t.scale.b>t.scale.c))return "Пороги оцінок мають спадати: «відмінно» більше за «добре», «добре» більше за «задовільно».";
+  if(!t.title)return ["Вкажіть назву тесту — поле вгорі сторінки.",-1];
+  if(!t.questions.length)return ["Додайте хоча б одне запитання.",-1];
+  if(!(t.scale.a>t.scale.b&&t.scale.b>t.scale.c))return ["Пороги оцінок мають спадати: «відмінно» більше за «добре», «добре» більше за «задовільно».",-1];
   for(let i=0;i<t.questions.length;i++){const q=t.questions[i],n="Запитання "+(i+1)+": ";
-    if(!q.text.trim())return n+"введіть текст.";
+    if(!q.text.trim())return [n+"введіть текст запитання.",i];
     if(q.type==="open")continue;
-    if(q.options.some(o=>!o.t.trim()))return n+"заповніть усі варіанти відповіді.";
+    if(q.options.length<2)return [n+"додайте щонайменше два варіанти відповіді.",i];
+    if(q.options.some(o=>!o.t.trim()))return [n+"заповніть усі варіанти відповіді або видаліть порожні кнопкою ✕.",i];
     const ok=q.options.filter(o=>o.ok).length;
-    if(!ok)return n+"позначте правильну відповідь.";
-    if(q.type!=="multi"&&ok>1)return n+"правильною може бути лише одна відповідь.";}
-  return "";
+    if(!ok)return [n+"позначте правильну відповідь — кружечок ліворуч від варіанта.",i];
+    if(q.type!=="multi"&&ok>1)return [n+"правильною може бути лише одна відповідь.",i];}
+  return ["",-1];
 }
-
+function parseBulk(text){
+  const out=[];
+  for(const block of text.replace(/\r/g,"").split(/\n\s*\n+/)){
+    const lines=block.split("\n").map(x=>x.trim()).filter(Boolean);if(!lines.length)continue;
+    const qtext=lines[0].replace(/^\d+\s*[.)]\s*/,"");
+    const opts=lines.slice(1).map(l=>{const ok=/^[*+]/.test(l);const t=l.replace(/^[*+]\s*/,"").replace(/^[-–•]\s*/,"").replace(/^[a-zа-яіїєґ\d]{1,2}\s*[.)]\s+/i,"").trim();return {t,ok}}).filter(o=>o.t);
+    const q=blankQ("open");q.text=qtext;
+    if(opts.length){const low=opts.map(o=>o.t.toLowerCase());
+      if(opts.length===2&&low.includes("так")&&low.includes("ні")){q.type="yn";const yes=opts[low.indexOf("так")],no=opts[low.indexOf("ні")];q.options=[{t:"Так",ok:yes.ok},{t:"Ні",ok:no.ok}]}
+      else{q.type=opts.filter(o=>o.ok).length>1?"multi":"one";q.options=opts}}
+    out.push(q)}
+  return out;
+}
 /* ---------- запуск: QR і посилання ---------- */
 function vRun(code){
   const t=D.tests[code];if(!t||(CLOUD&&t.example))return go("cab");const url=testUrl(code);watch(code);
@@ -3052,13 +3093,15 @@ document.addEventListener("click",e=>{
   if(act==="xlsx")exportXlsx(c);
   if(act==="print")window.print();
   if(draft&&/^(q|o)/.test(act)){pull();const i=+b.dataset.i,Q=draft.questions;
-    if(act==="qadd")Q.push(blankQ(b.dataset.t));
+    if(act==="qadd"){Q.push(blankQ(b.dataset.t));editFocus=Q.length-1}
+    if(act==="qdup"){const c=JSON.parse(JSON.stringify(Q[i]));c.id=uid();Q.splice(i+1,0,c);editFocus=i+1}
+    if(act==="qbulk"){const add=parseBulk($("#bulk").value);if(!add.length){toast("Спершу вставте запитання в поле");return}editFocus=Q.length;const emptyFirst=Q.length===1&&!Q[0].text.trim()&&Q[0].options.every(o=>!o.t.trim());if(emptyFirst){Q.length=0;editFocus=0}Q.push(...add);setTimeout(()=>toast("Додано запитань: "+add.length),50)}
     if(act==="qdel")Q.splice(i,1);
     if(act==="qup")[Q[i-1],Q[i]]=[Q[i],Q[i-1]];
     if(act==="qdown")[Q[i+1],Q[i]]=[Q[i],Q[i+1]];
     if(act==="oadd")Q[i].options.push({t:"",ok:false});
     if(act==="odel")Q[i].options.splice(+b.dataset.j,1);
-    const y=window.scrollY;vEdit(draft.code);window.scrollTo(0,act==="qadd"?document.body.scrollHeight:y)}
+    const y=window.scrollY,foc=editFocus!==null;vEdit(draft.code);if(!foc)window.scrollTo(0,y);if(act==="qadd")toast("Запитання "+Q.length+" додано")}
   if(run&&!run.done){const t=D.tests[run.code];
     if(act==="next"||act==="prev"){run._rec&&run._rec();run.i+=act==="next"?1:-1;keep();vTest(t)}
     if(act==="ask"){run._rec&&run._rec();const miss=run.order.filter(id=>{const v=run.answers[id];return v===undefined||v===""||(Array.isArray(v)&&!v.length)}).length;$("#finTxt").textContent=miss?"Без відповіді залишилося запитань: "+miss+". Завершити тест і надіслати відповіді?":"Ви відповіли на всі запитання. Надіслати відповіді?";$("#fin").hidden=false;$("#fin").scrollIntoView({block:"center"})}
